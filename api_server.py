@@ -3,8 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import sqlite3
 from datetime import datetime
-import os
 from typing import List, Optional
+import os
 
 app = FastAPI(title="Beauty Garden API")
 
@@ -20,12 +20,11 @@ app.add_middleware(
 
 # Модели данных
 class Product(BaseModel):
-    id: Optional[int] = None
     name: str
-    category: str
-    brand: str
-    volume: int
-    skin_type: str
+    category: str = ""
+    brand: str = ""
+    volume: int = 0
+    skin_type: str = "все типы"
     selling_price: float
     stock: int
 
@@ -44,19 +43,18 @@ class Order(BaseModel):
     delivery_date: str
 
 
-# Подключение к БД
 def get_db():
     conn = sqlite3.connect('beauty_shop.db')
     conn.row_factory = sqlite3.Row
     return conn
 
 
-# Инициализация базы данных
-def init_database():
+# Создаем таблицы если их нет
+def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    # Создаем таблицы
+    # Таблица товаров
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,6 +69,7 @@ def init_database():
         )
     ''')
 
+    # Таблица заказов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +84,7 @@ def init_database():
         )
     ''')
 
+    # Таблица товаров в заказе
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS order_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,12 +92,11 @@ def init_database():
             product_id INTEGER NOT NULL,
             quantity INTEGER NOT NULL,
             unit_price REAL NOT NULL,
-            total_price REAL NOT NULL,
-            FOREIGN KEY (order_id) REFERENCES mobile_orders (id),
-            FOREIGN KEY (product_id) REFERENCES products (id)
+            total_price REAL NOT NULL
         )
     ''')
 
+    # Контакты
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS company_contacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,28 +109,21 @@ def init_database():
         )
     ''')
 
-    # Проверяем, есть ли товары
+    # Добавляем тестовые товары если таблица пустая
     cursor.execute("SELECT COUNT(*) FROM products")
     if cursor.fetchone()[0] == 0:
-        # Добавляем тестовые товары из вашей БД
-        products_data = [
+        test_products = [
             ("Увлажняющий крем", "крем", "La Roche-Posay", 50, "все типы", 800, 1500, 100),
             ("Очищающая пенка", "очищение", "CeraVe", 150, "все типы", 500, 950, 80),
             ("Гиалуроновая сыворотка", "сыворотка", "The Ordinary", 30, "все типы", 400, 750, 60),
             ("Мицеллярная вода", "очищение", "Bioderma", 250, "чувствительная", 600, 1200, 90),
             ("Тоник успокаивающий", "тоник", "Avene", 200, "чувствительная", 350, 700, 70),
-            ("Восстанавливающий крем", "крем", "Vichy", 50, "сухая", 700, 1350, 50),
-            ("Маттирующий тоник", "тоник", "Nuxe", 200, "жирная", 400, 800, 40),
-            ("Пилинг для лица", "пилинг", "Clarins", 75, "все типы", 900, 1800, 30),
-            ("Крем для глаз", "крем", "Kiehl's", 15, "чувствительная", 1100, 2200, 25),
-            ("Сыворотка с витамином C", "сыворотка", "Loreal Paris", 30, "все типы", 600, 1200, 45),
         ]
-
-        for product in products_data:
+        for p in test_products:
             cursor.execute('''
                 INSERT INTO products (name, category, brand, volume, skin_type, purchase_price, selling_price, stock)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', product)
+            ''', p)
 
     # Добавляем контакты
     cursor.execute("SELECT COUNT(*) FROM company_contacts")
@@ -139,26 +131,21 @@ def init_database():
         cursor.execute('''
             INSERT INTO company_contacts (phone, email, address, work_hours, instagram, telegram)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            "+7 (999) 123-45-67",
-            "beauty.garden@shop.ru",
-            "г. Москва, ул. Цветочная, д. 15",
-            "Пн-Пт: 10:00-20:00, Сб-Вс: 11:00-18:00",
-            "@beauty_garden",
-            "@beauty_garden_bot"
-        ))
+        ''', ("+7 (999) 123-45-67", "beauty.garden@shop.ru", "г. Москва, ул. Цветочная, д. 15",
+              "Пн-Пт: 10:00-20:00", "@beauty_garden", "@beauty_garden_bot"))
 
     conn.commit()
     conn.close()
+    print("✅ Database initialized")
 
 
-# API Endpoints
+# API endpoints
 @app.get("/")
 def root():
-    return {"message": "Beauty Garden API", "version": "1.0", "status": "online"}
+    return {"message": "Beauty Garden API", "status": "online"}
 
 
-@app.get("/api/products", response_model=List[Product])
+@app.get("/api/products")
 def get_products(search: Optional[str] = None, category: Optional[str] = None):
     conn = get_db()
     query = "SELECT id, name, category, brand, volume, skin_type, selling_price, stock FROM products WHERE stock > 0"
@@ -180,7 +167,8 @@ def get_products(search: Optional[str] = None, category: Optional[str] = None):
 @app.get("/api/categories")
 def get_categories():
     conn = get_db()
-    categories = conn.execute("SELECT DISTINCT category FROM products WHERE category IS NOT NULL").fetchall()
+    categories = conn.execute(
+        "SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != ''").fetchall()
     conn.close()
     return [{"name": cat[0]} for cat in categories]
 
@@ -199,19 +187,19 @@ def create_order(order: Order):
         for item in order.items:
             stock = cursor.execute("SELECT stock FROM products WHERE id = ?", (item.product_id,)).fetchone()
             if not stock or stock[0] < item.quantity:
-                raise HTTPException(status_code=400, detail=f"Товар {item.product_id} отсутствует")
+                raise HTTPException(status_code=400, detail="Товар отсутствует")
 
         # Создаем заказ
         cursor.execute('''
             INSERT INTO mobile_orders 
-            (order_number, customer_name, customer_phone, delivery_address, delivery_date, total_amount, status, order_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (order_number, customer_name, customer_phone, delivery_address, delivery_date, total_amount, order_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (order_number, order.customer_name, order.customer_phone, order.delivery_address,
-              order.delivery_date, total_amount, 'новый', order_date))
+              order.delivery_date, total_amount, order_date))
 
         order_id = cursor.lastrowid
 
-        # Добавляем товары
+        # Добавляем товары и обновляем остатки
         for item in order.items:
             cursor.execute('''
                 INSERT INTO order_items (order_id, product_id, quantity, unit_price, total_price)
@@ -247,13 +235,22 @@ def get_contacts():
     conn = get_db()
     contacts = conn.execute("SELECT * FROM company_contacts ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
-    return dict(contacts) if contacts else {}
+
+    if contacts:
+        return dict(contacts)
+    return {
+        "phone": "+7 (999) 123-45-67",
+        "email": "beauty.garden@shop.ru",
+        "address": "г. Москва, ул. Цветочная, д. 15",
+        "work_hours": "Пн-Пт: 10:00-20:00",
+        "instagram": "@beauty_garden",
+        "telegram": "@beauty_garden_bot"
+    }
 
 
-# Запуск
+
 if __name__ == "__main__":
-    init_database()
+    init_db()
     import uvicorn
-
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
