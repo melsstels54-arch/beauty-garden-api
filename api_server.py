@@ -4,11 +4,9 @@ from pydantic import BaseModel
 import sqlite3
 from datetime import datetime
 from typing import List, Optional
-import os
 
 app = FastAPI(title="Beauty Garden API")
 
-# Разрешаем доступ с любых устройств
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,7 +16,6 @@ app.add_middleware(
 )
 
 
-# Модели данных
 class Product(BaseModel):
     name: str
     category: str = ""
@@ -49,12 +46,10 @@ def get_db():
     return conn
 
 
-# Создаем таблицы если их нет
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    # Таблица товаров
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +64,6 @@ def init_db():
         )
     ''')
 
-    # Таблица заказов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +78,6 @@ def init_db():
         )
     ''')
 
-    # Таблица товаров в заказе
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS order_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +89,6 @@ def init_db():
         )
     ''')
 
-    # Контакты
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS company_contacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,15 +101,12 @@ def init_db():
         )
     ''')
 
-    # Добавляем тестовые товары если таблица пустая
     cursor.execute("SELECT COUNT(*) FROM products")
     if cursor.fetchone()[0] == 0:
         test_products = [
             ("Увлажняющий крем", "крем", "La Roche-Posay", 50, "все типы", 800, 1500, 100),
             ("Очищающая пенка", "очищение", "CeraVe", 150, "все типы", 500, 950, 80),
             ("Гиалуроновая сыворотка", "сыворотка", "The Ordinary", 30, "все типы", 400, 750, 60),
-            ("Мицеллярная вода", "очищение", "Bioderma", 250, "чувствительная", 600, 1200, 90),
-            ("Тоник успокаивающий", "тоник", "Avene", 200, "чувствительная", 350, 700, 70),
         ]
         for p in test_products:
             cursor.execute('''
@@ -125,7 +114,6 @@ def init_db():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', p)
 
-    # Добавляем контакты
     cursor.execute("SELECT COUNT(*) FROM company_contacts")
     if cursor.fetchone()[0] == 0:
         cursor.execute('''
@@ -136,32 +124,21 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("✅ Database initialized")
+    print("✅ DB initialized")
 
 
-# API endpoints
 @app.get("/")
 def root():
     return {"message": "Beauty Garden API", "status": "online"}
 
 
 @app.get("/api/products")
-def get_products(search: Optional[str] = None, category: Optional[str] = None):
+def get_products():
     conn = get_db()
-    query = "SELECT id, name, category, brand, volume, skin_type, selling_price, stock FROM products WHERE stock > 0"
-    params = []
-
-    if search:
-        query += " AND name LIKE ?"
-        params.append(f"%{search}%")
-    if category and category != "все":
-        query += " AND category = ?"
-        params.append(category)
-
-    query += " ORDER BY name"
-    products = conn.execute(query, params).fetchall()
+    products = conn.execute(
+        "SELECT id, name, category, brand, volume, skin_type, selling_price, stock FROM products WHERE stock > 0").fetchall()
     conn.close()
-    return [dict(product) for product in products]
+    return [dict(p) for p in products]
 
 
 @app.get("/api/categories")
@@ -177,44 +154,33 @@ def get_categories():
 def create_order(order: Order):
     conn = get_db()
     cursor = conn.cursor()
-
     order_number = f"BG{datetime.now().strftime('%Y%m%d%H%M%S')}"
     total_amount = sum(item.quantity * item.unit_price for item in order.items)
     order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    try:
-        # Проверяем наличие
-        for item in order.items:
-            stock = cursor.execute("SELECT stock FROM products WHERE id = ?", (item.product_id,)).fetchone()
-            if not stock or stock[0] < item.quantity:
-                raise HTTPException(status_code=400, detail="Товар отсутствует")
+    for item in order.items:
+        stock = cursor.execute("SELECT stock FROM products WHERE id = ?", (item.product_id,)).fetchone()
+        if not stock or stock[0] < item.quantity:
+            raise HTTPException(status_code=400, detail="Товара нет")
 
-        # Создаем заказ
+    cursor.execute('''
+        INSERT INTO mobile_orders (order_number, customer_name, customer_phone, delivery_address, delivery_date, total_amount, order_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (order_number, order.customer_name, order.customer_phone, order.delivery_address, order.delivery_date,
+          total_amount, order_date))
+
+    order_id = cursor.lastrowid
+
+    for item in order.items:
         cursor.execute('''
-            INSERT INTO mobile_orders 
-            (order_number, customer_name, customer_phone, delivery_address, delivery_date, total_amount, order_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (order_number, order.customer_name, order.customer_phone, order.delivery_address,
-              order.delivery_date, total_amount, order_date))
+            INSERT INTO order_items (order_id, product_id, quantity, unit_price, total_price)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (order_id, item.product_id, item.quantity, item.unit_price, item.quantity * item.unit_price))
+        cursor.execute("UPDATE products SET stock = stock - ? WHERE id = ?", (item.quantity, item.product_id))
 
-        order_id = cursor.lastrowid
-
-        # Добавляем товары и обновляем остатки
-        for item in order.items:
-            cursor.execute('''
-                INSERT INTO order_items (order_id, product_id, quantity, unit_price, total_price)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (order_id, item.product_id, item.quantity, item.unit_price, item.quantity * item.unit_price))
-
-            cursor.execute("UPDATE products SET stock = stock - ? WHERE id = ?", (item.quantity, item.product_id))
-
-        conn.commit()
-        return {"success": True, "order_number": order_number, "total_amount": total_amount}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
+    return {"success": True, "order_number": order_number, "total_amount": total_amount}
 
 
 @app.get("/api/orders/{phone}")
@@ -222,12 +188,10 @@ def get_orders(phone: str):
     conn = get_db()
     orders = conn.execute('''
         SELECT id, order_number, customer_name, total_amount, status, order_date, delivery_address, delivery_date
-        FROM mobile_orders 
-        WHERE customer_phone = ?
-        ORDER BY order_date DESC
+        FROM mobile_orders WHERE customer_phone = ? ORDER BY order_date DESC
     ''', (phone,)).fetchall()
     conn.close()
-    return [dict(order) for order in orders]
+    return [dict(o) for o in orders]
 
 
 @app.get("/api/contacts")
@@ -235,22 +199,15 @@ def get_contacts():
     conn = get_db()
     contacts = conn.execute("SELECT * FROM company_contacts ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
-
     if contacts:
         return dict(contacts)
-    return {
-        "phone": "+7 (999) 123-45-67",
-        "email": "beauty.garden@shop.ru",
-        "address": "г. Москва, ул. Цветочная, д. 15",
-        "work_hours": "Пн-Пт: 10:00-20:00",
-        "instagram": "@beauty_garden",
-        "telegram": "@beauty_garden_bot"
-    }
-
+    return {"phone": "+7 (999) 123-45-67", "email": "beauty.garden@shop.ru",
+            "address": "г. Москва, ул. Цветочная, д. 15", "work_hours": "Пн-Пт: 10:00-20:00",
+            "instagram": "@beauty_garden", "telegram": "@beauty_garden_bot"}
 
 
 if __name__ == "__main__":
     init_db()
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
